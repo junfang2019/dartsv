@@ -9,19 +9,11 @@ import 'package:dartsv/src/script/interpreter.dart';
 import 'package:dartsv/src/script/opcodes.dart';
 import 'package:dartsv/src/script/scriptflags.dart';
 import 'package:dartsv/src/script/svscript.dart';
-import 'package:dartsv/src/transaction/p2pkh_locking_script_builder.dart';
-import 'package:dartsv/src/transaction/p2pkh_unlocking_script_builder.dart';
+import 'package:dartsv/src/transaction/default_builder.dart';
+import 'package:dartsv/src/transaction/signed_unlock_builder.dart';
+import 'package:dartsv/src/transaction/transaction_input.dart';
 import 'package:hex/hex.dart';
 import 'package:test/test.dart';
-
-/*
-FIXME: ALL The tx_valid.json test vectors pass. All the signatures validate.
-For some reason this one refuses to validate:
-
-[[["e16abbe80bf30c080f63830c8dbf669deaef08957446e95940227d8c5e6db612", 0, "1 0x21 0x03905380c7013e36e6e19d305311c1b81fce6581f5ee1c86ef0627c68c9362fc9f 0x00 2 CHECKMULTISIG"]],
-"010000000112b66d5e8c7d224059e946749508efea9d66bf8d0c83630f080cf30be8bb6ae100000000490047304402206ffe3f14caf38ad5c1544428e99da76ffa5455675ec8d9780fac215ca17953520220779502985e194d84baa36b9bd40a0dbd981163fa191eb884ae83fc5bd1c86b1101ffffffff010100000000000000232103905380c7013e36e6e19d305311c1b81fce6581f5ee1c86ef0627c68c9362fc9fac00000000", "P2SH"],
-
- */
 
 void main() {
     getFlags(flagstr) {
@@ -154,10 +146,9 @@ void main() {
                 "scriptPubKey": scriptPubkey.toString(),
                 "satoshis": BigInt.from(100000)
             };
-            var tx = new Transaction()
-                .spendFromMap(utxo)
-                .withUnLockingScriptBuilder(P2PKHUnlockBuilder())
-                .spendTo(toAddress, BigInt.from(100000));
+            var tx = Transaction()
+                .spendFromMap(utxo, scriptBuilder: P2PKHUnlockBuilder(publicKey))
+                .spendTo(toAddress, BigInt.from(100000), scriptBuilder: P2PKHLockBuilder(toAddress));
             tx.signInput( 0, privateKey, sighashType: 1);
 //                .signWith(privateKey, sighashType: 1);
 
@@ -165,9 +156,12 @@ void main() {
             var inputIndex = 0;
             print(HEX.encode(hash160(HEX.decode(publicKey.toString()))));
 
-            var signature = tx.inputs[0].signature;
+            var signature = (tx.inputs[0].scriptBuilder as SignedUnlockBuilder).signatures[0];
 
-            var scriptSig = P2PKHUnlockBuilder().getScriptSig(signature, publicKey);
+            var scriptBuilder = P2PKHUnlockBuilder(publicKey);
+            scriptBuilder.signatures.add(signature);
+            var scriptSig = scriptBuilder.getScriptSig();
+
             var flags = ScriptFlags.SCRIPT_VERIFY_P2SH | ScriptFlags.SCRIPT_VERIFY_STRICTENC;
             var interpreter = Interpreter();
 
@@ -435,33 +429,44 @@ void main() {
         var hashbuf = List<int>(32);
         hashbuf.fillRange(0, hashbuf.length, 0);
         Transaction credtx = new Transaction();
+        var coinbaseUnlockBuilder = DefaultUnlockBuilder();
+        coinbaseUnlockBuilder.fromScript(SVScript.fromString('OP_0 OP_0'));
         TransactionInput txCredInput = TransactionInput(
             '0000000000000000000000000000000000000000000000000000000000000000',
             0xffffffff,
-            SVScript.fromString('OP_0 OP_0'),
+            SVScript(),
             BigInt.zero,
-            0xffffffff
+            0xffffffff,
+            scriptBuilder: coinbaseUnlockBuilder
         );
         credtx.addInput(txCredInput);
         credtx.serialize(performChecks: false);
-        var txCredOut = TransactionOutput();
+
+        //add output to spent Transaction
+        var txOutLockBuilder = DefaultLockBuilder();
+        txOutLockBuilder.fromScript(scriptPubkey);
+        var txCredOut = TransactionOutput(scriptBuilder: txOutLockBuilder);
         txCredOut.satoshis = BigInt.from(inputAmount);
         txCredOut.script = scriptPubkey;
         credtx.addOutput(txCredOut);
 
-        String idbuf = credtx.id;
+        //setup transaction ID of spent Transaction
+        String prevTxId = credtx.id;
 
+        var defaultUnlockBuilder = DefaultUnlockBuilder();
+        defaultUnlockBuilder.fromScript(scriptSig);
         var spendtx = Transaction();
         var txSpendInput = TransactionInput(
-            idbuf,
+            prevTxId,
             0,
-            scriptSig,
+            scriptPubkey,
             BigInt.zero,
-            0xffffffff,
+            TransactionInput.UINT_MAX,
+            scriptBuilder: defaultUnlockBuilder
         );
         spendtx.addInput(txSpendInput);
-        var txSpendOutput = new TransactionOutput();
-        txSpendOutput.script = new SVScript();
+        var txSpendOutput = TransactionOutput();
+        txSpendOutput.script = SVScript();
         txSpendOutput.satoshis = BigInt.from(inputAmount);
         spendtx.addOutput(txSpendOutput);
 
